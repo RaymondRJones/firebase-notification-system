@@ -1,60 +1,66 @@
-/**
- * Import function triggers from their respective submodules:
- *
- * const {onCall} = require("firebase-functions/v2/https");
- * const {onDocumentWritten} = require("firebase-functions/v2/firestore");
- *
- * See a full list of supported triggers at https://firebase.google.com/docs/functions
- */
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
-const sgMail = require("@sendgrid/mail");
-
-// You don't seem to be using these, so I'm commenting them out.
-// If you need them in the future, simply uncomment.
-// const {onRequest} = require("firebase-functions/v2/https");
-// const logger = require("firebase-functions/logger");
-
-// Create and deploy your first functions
-// https://firebase.google.com/docs/functions/get-started
-
-// Commented out as you're not using it.
-// exports.helloWorld = onRequest((request, response) => {
-//   logger.info("Hello logs!", {structuredData: true});
-//   response.send("Hello from Firebase!");
-// });
 
 admin.initializeApp();
 
-sgMail.setApiKey(functions.config().sendgrid.key);
+const db = admin.firestore();
 
-exports.sendWelcomeEmailWithTemplate = functions.firestore
+exports.assignReferralCode = functions.firestore
     .document("clients/{userId}")
-    .onCreate((snap, context) => {
-      const newUser = snap.data();
+    .onCreate(async (snap, context) => {
+      const userId = context.params.userId;
 
-      const msg = {
-        to: {
-          email: newUser.email,
-          name: newUser.name,
-        },
-        from: "ray@raymondjones.dev",
-        templateId: "d-c2c2a6c8a5d2425da166762fbe979d5e",
-        dynamic_template_data: {
-          name: newUser.name,
-          referral: newUser.referral_code,
-        },
-      };
+      // Get an unused referral code
+      const referralCode = await fetchUnusedReferralCode();
 
-      return sgMail
-          .send(msg)
-          .then((response) => {
-            console.log("Email sent successfully!");
-            console.log(response[0].statusCode);
-            console.log(response[0].headers);
-          })
-          .catch((error) => {
-            console.error(error);
-          });
+      if (!referralCode) {
+        console.error("No available referral codes.");
+        return null;
+      }
+
+      // Update the user's document with the unused referral code
+      await db.collection("clients").doc(userId).update({
+        referral_code: referralCode,
+      });
+
+      // Delete the used referral code from the list
+      return markReferralCodeAsUsed(referralCode);
     });
 
+/**
+ * Fetches an unused referral code from the database.
+ *
+ * @function
+ * @async
+ * @return {Promise<string|null>}
+ * The unused referral code, or null if none available.
+ */
+async function fetchUnusedReferralCode() {
+  const snapshot = await db.collection("referral_codes").limit(1).get();
+
+  if (snapshot.empty) {
+    return null;
+  }
+
+  // Return the first available referral code
+  const firstDoc = snapshot.docs[0];
+  return firstDoc.data().code;
+}
+
+/**
+ * Deletes a referral code from the available codes list.
+ *
+ * @function
+ * @async
+ * @param {string} referralCode - The referral code to be deleted.
+ * @return {Promise<void>}
+ */
+async function markReferralCodeAsUsed(referralCode) {
+  const snapshot = await db.collection("referral_codes")
+      .where("code", "==", referralCode).get();
+
+  if (!snapshot.empty) {
+    // Delete the used referral code document
+    return snapshot.docs[0].ref.delete();
+  }
+}
